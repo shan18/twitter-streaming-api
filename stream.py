@@ -12,40 +12,60 @@ from tweepy import Stream
 import keys
 
 
-# For storing data
-STREAM_OUT = []
+# For storing stream output and data
+STREAM_OUT = [[], []]
+STREAM_DATA = [pd.DataFrame() for x in range(5)]
+STREAM_LINKS = [[] for x in range(5)]
 
-# Flags
-STOP_STREAM = False
+MIN_PASSED = 0
 
 
 class Listener(StreamListener):
     """ Listener for Tweepy API """
 
     def on_data(self, data):
-        STREAM_OUT.append(json.loads(data))
-        return not STOP_STREAM
+        STREAM_OUT[MIN_PASSED % 2].append(json.loads(data))
+        return True
     
     def on_error(self, status):
         print(status)
 
 
+def print_status(mode):
+    if mode == 'generate':
+        if MIN_PASSED < 5:
+            print('\n\nGenerating reports for minute %d - %d... (Please wait for 1 minute)' % (0, MIN_PASSED + 1))
+        else:
+            print('\n\nGenerating reports for minute %d - %d... (Please wait for 1 minute)' % (MIN_PASSED - 4, MIN_PASSED + 1))
+    if mode == 'done':
+        if MIN_PASSED <= 5:
+            print('\n\nReports for minute %d - %d' % (0, MIN_PASSED))
+        else:
+            print('\n\nReports for minute %d - %d' % (MIN_PASSED - 5, MIN_PASSED))
+
+
 def get_stream_data():
     """ Clean the data in STREAM_OUT """
-    data = pd.DataFrame()
+    global STREAM_DATA, STREAM_OUT, STREAM_LINKS
+    idx = (MIN_PASSED - 1) % 5
+    idx_out = (MIN_PASSED - 1) % 2
+    STREAM_DATA[idx] = pd.DataFrame()
+    STREAM_LINKS[idx] = STREAM_OUT[idx_out]
 
     # Username
-    data['user'] = list(map(lambda x: x['user']['screen_name'], STREAM_OUT))
+    STREAM_DATA[idx]['user'] = list(map(lambda x: x['user']['screen_name'], STREAM_OUT[idx_out]))
 
     # Text
     tweet = []
-    for x in STREAM_OUT:
+    for x in STREAM_OUT[idx_out]:
         if 'extended_tweet' in x:
             tweet.append(x['extended_tweet']['full_text'])
         else:
             tweet.append(x['text'])
-    data['text'] = tweet
+    STREAM_DATA[idx]['text'] = tweet
+    STREAM_OUT[idx_out] = []
 
+    data = pd.concat([x for x in STREAM_DATA])
     return data
 
 
@@ -65,14 +85,15 @@ def get_links_report():
     print('\n\nLinks Report:\n')
     links_count = 0
     domains = {}
-    for x in STREAM_OUT:
-        for url in x['entities']['urls']:
-            links_count += 1
-            domain = '.'.join(url['expanded_url'].split('/')[2].split('.')[-2:])
-            if domain not in domains:
-                domains[domain] = 1
-            else:
-                domains[domain] += 1
+    for out_min in STREAM_LINKS:
+        for x in out_min:
+            for url in x['entities']['urls']:
+                links_count += 1
+                domain = '.'.join(url['expanded_url'].split('/')[2].split('.')[-2:])
+                if domain not in domains:
+                    domains[domain] = 1
+                else:
+                    domains[domain] += 1
     sorted_domains = sorted(domains.items(), key=lambda x: x[1], reverse=True)
 
     print('Total Number of links:', links_count)
@@ -95,7 +116,9 @@ def get_content_report(data):
         for word in words:
             if len(word) > 1:
                 if word[0] == "'":
-                    word = word[1:]
+                    if len(word) == 2:  # Remove the word --> 's
+                        continue
+                    word = word[1:]  # Remove ' from word beginnings
                 if word not in freq_count:
                     freq_count[word] = 1
                 else:
@@ -113,30 +136,24 @@ def get_content_report(data):
 
 
 def stream_tweets(auth, keyword):
-    global STOP_STREAM
-
-    max_minutes = 5
+    global MIN_PASSED
 
     t_start = time.time()
     stream = Stream(auth, Listener())
     stream.filter(track=[keyword], languages=['en'], is_async=True)
     
-    print('Generating reports... (Please wait for 1 minute)')
-    minutes_passed = 0
-    while not STOP_STREAM:
+    print_status('generate')
+    while True:
         if (time.time() - t_start) % 60 == 0:
-            minutes_passed += 1
-            print('\n\nReports after %d minutes' % minutes_passed)
-            stream_data = get_stream_data()
-            get_user_report(stream_data)  # user report
-            get_links_report()  # links report
-            get_content_report(stream_data)  # content report
+            MIN_PASSED += 1
+            print_status('done')
+            data = get_stream_data()
 
-            if minutes_passed == max_minutes:
-                STOP_STREAM = True
-                print('\n\nFinished.')
-            else:
-                print('\n\n\nGenerating reports for the next minute...')
+            get_user_report(data)  # user report
+            get_links_report()  # links report
+            get_content_report(data)  # content report
+
+            print_status('generate')
 
 
 def main(keyword):
